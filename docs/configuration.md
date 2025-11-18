@@ -26,26 +26,39 @@ This document outlines the environment variables available for configuring the `
 
 > [!TIP] > **For troubleshooting:** Set `COMFY_LOG_LEVEL=DEBUG` to get detailed logs when ComfyUI crashes or behaves unexpectedly. This helps identify the exact point of failure in your workflows.
 
-## AWS S3 Upload Configuration
+## S3-Compatible Storage Upload Configuration
 
-Configure these variables **only** if you want the worker to upload generated images directly to an AWS S3 bucket. If these are not set, images will be returned as base64-encoded strings in the API response.
+Configure these variables **only** if you want the worker to upload generated images directly to an S3-compatible storage service (AWS S3 or Cloudflare R2). If these are not set, images will be returned as base64-encoded strings in the API response.
+
+### AWS S3 Configuration
 
 - **Prerequisites:**
   - An AWS S3 bucket in your desired region.
   - An AWS IAM user with programmatic access (Access Key ID and Secret Access Key).
   - Permissions attached to the IAM user allowing `s3:PutObject` (and potentially `s3:PutObjectAcl` if you need specific ACLs) on the target bucket.
 
-| Environment Variable       | Description                                                                                                                             | Example                                                    |
-| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
-| `BUCKET_ENDPOINT_URL`      | The full endpoint URL of your S3 bucket. **Must be set to enable S3 upload.**                                                           | `https://<your-bucket-name>.s3.<aws-region>.amazonaws.com` |
-| `BUCKET_ACCESS_KEY_ID`     | Your AWS access key ID associated with the IAM user that has write permissions to the bucket. Required if `BUCKET_ENDPOINT_URL` is set. | `AKIAIOSFODNN7EXAMPLE`                                     |
-| `BUCKET_SECRET_ACCESS_KEY` | Your AWS secret access key associated with the IAM user. Required if `BUCKET_ENDPOINT_URL` is set.                                      | `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`                 |
+### Cloudflare R2 Configuration
 
-**Note:** Upload uses the `runpod` Python library helper `rp_upload.upload_image`, which handles creating a unique path within the bucket based on the `job_id`.
+- **Prerequisites:**
+  - A Cloudflare R2 bucket.
+  - An R2 API token with read and write permissions. Create one in the Cloudflare dashboard under **R2 > Manage R2 API Tokens**.
+  - Your Cloudflare Account ID (found in the R2 dashboard URL or account settings).
 
-### Example S3 Response
+| Environment Variable       | Description                                                                                                                             | Example (AWS S3)                                                    | Example (Cloudflare R2)                                    |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- | ---------------------------------------------------------- |
+| `BUCKET_ENDPOINT_URL`      | The full endpoint URL of your storage bucket. **Must be set to enable upload.**                                                         | `https://<your-bucket-name>.s3.<aws-region>.amazonaws.com`         | `https://<account-id>.r2.cloudflarestorage.com`           |
+| `BUCKET_ACCESS_KEY_ID`     | Your access key ID. Required if `BUCKET_ENDPOINT_URL` is set.                                                                           | `AKIAIOSFODNN7EXAMPLE`                                             | Your R2 API token Access Key ID                             |
+| `BUCKET_SECRET_ACCESS_KEY` | Your secret access key. Required if `BUCKET_ENDPOINT_URL` is set.                                                                       | `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`                         | Your R2 API token Secret Access Key                        |
+| `BUCKET_NAME`               | The name of your bucket. **Required for R2, optional for S3** (if not set, falls back to `rp_upload`).                                   | `my-s3-bucket`                                                      | `my-r2-bucket`                                             |
+| `BUCKET_REGION`             | The AWS region (only used for S3, ignored for R2). Optional, defaults to `us-east-1`.                                                   | `us-east-1`                                                        | N/A (not used for R2)                                      |
 
-If the S3 environment variables (`BUCKET_ENDPOINT_URL`, `BUCKET_ACCESS_KEY_ID`, `BUCKET_SECRET_ACCESS_KEY`) are correctly configured, a successful job response will look similar to this:
+**Note:** 
+- If `BUCKET_NAME` is set, the worker will use a custom upload function that supports both AWS S3 and Cloudflare R2. This provides better R2 compatibility and allows you to use custom R2 endpoints.
+- If `BUCKET_NAME` is not set, the worker will fall back to the `runpod` Python library helper `rp_upload.upload_image`, which handles creating a unique path within the bucket based on the `job_id` but may not support R2 custom endpoints.
+
+### Example Upload Response
+
+If the storage environment variables are correctly configured, a successful job response will look similar to this:
 
 ```json
 {
@@ -67,4 +80,4 @@ If the S3 environment variables (`BUCKET_ENDPOINT_URL`, `BUCKET_ACCESS_KEY_ID`, 
 }
 ```
 
-The `data` field contains the presigned URL to the uploaded image file in your S3 bucket. The path usually includes the job ID.
+The `data` field contains the URL to the uploaded image file in your storage bucket. The path usually includes the job ID.

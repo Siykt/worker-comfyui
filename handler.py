@@ -13,6 +13,8 @@ import uuid
 import tempfile
 import socket
 import traceback
+import boto3
+from botocore.exceptions import ClientError
 
 # Time to wait between API check attempts in milliseconds
 COMFY_API_AVAILABLE_INTERVAL_MS = 50
@@ -492,6 +494,104 @@ def get_image_data(filename, subfolder, image_type):
         return None
 
 
+def upload_to_s3_or_r2(job_id, file_path, filename):
+    """
+    Upload a file to S3 or Cloudflare R2 bucket using boto3.
+    Supports both AWS S3 and Cloudflare R2 (S3-compatible) storage.
+
+    Args:
+        job_id (str): The job ID used to create a unique path in the bucket.
+        file_path (str): Local path to the file to upload.
+        filename (str): Original filename to use as the object key.
+
+    Returns:
+        str: The URL of the uploaded file, or None if upload fails.
+
+    Environment Variables:
+        BUCKET_ENDPOINT_URL: The endpoint URL (required).
+                            For AWS S3: https://<bucket-name>.s3.<region>.amazonaws.com
+                            For Cloudflare R2: https://<account-id>.r2.cloudflarestorage.com
+        BUCKET_ACCESS_KEY_ID: Access key ID (required).
+        BUCKET_SECRET_ACCESS_KEY: Secret access key (required).
+        BUCKET_NAME: The bucket name (required).
+        BUCKET_REGION: AWS region (optional, defaults to 'us-east-1').
+    """
+    endpoint_url = os.environ.get("BUCKET_ENDPOINT_URL")
+    access_key_id = os.environ.get("BUCKET_ACCESS_KEY_ID")
+    secret_access_key = os.environ.get("BUCKET_SECRET_ACCESS_KEY")
+    bucket_name = os.environ.get("BUCKET_NAME")
+    region = os.environ.get("BUCKET_REGION", "us-east-1")
+
+    if not all([endpoint_url, access_key_id, secret_access_key, bucket_name]):
+        print(
+            "worker-comfyui - Missing required S3/R2 configuration. "
+            "Need: BUCKET_ENDPOINT_URL, BUCKET_ACCESS_KEY_ID, "
+            "BUCKET_SECRET_ACCESS_KEY, BUCKET_NAME"
+        )
+        return None
+
+    try:
+        # Determine if this is Cloudflare R2 based on endpoint URL
+        is_r2 = "r2.cloudflarestorage.com" in endpoint_url.lower()
+
+        # Create S3 client with custom endpoint for R2 support
+        s3_config = {
+            "endpoint_url": endpoint_url,
+            "aws_access_key_id": access_key_id,
+            "aws_secret_access_key": secret_access_key,
+            "region_name": region,
+        }
+
+        # For R2, we need to use path-style addressing
+        if is_r2:
+            s3_config["config"] = boto3.session.Config(
+                signature_version="s3v4",
+                s3={"addressing_style": "path"},
+            )
+
+        s3_client = boto3.client("s3", **s3_config)
+
+        # Create object key: job_id/filename
+        object_key = f"{job_id}/{filename}"
+
+        # Upload file
+        print(
+            f"worker-comfyui - Uploading {filename} to {'R2' if is_r2 else 'S3'} bucket {bucket_name}..."
+        )
+        s3_client.upload_file(file_path, bucket_name, object_key)
+
+        # Construct the public URL
+        # For R2, use the custom domain or account endpoint
+        # For S3, use standard S3 URL format
+        if is_r2:
+            # R2 public URL format:
+            # - Account endpoint: https://<account-id>.r2.cloudflarestorage.com/<bucket-name>/<object-key>
+            # - Custom domain: https://<custom-domain>/<object-key> (if bucket is already in path)
+            # Check if endpoint already contains bucket name in path
+            endpoint_clean = endpoint_url.rstrip("/")
+            if bucket_name in endpoint_clean:
+                # Custom domain with bucket already in path, just add object key
+                url = f"{endpoint_clean}/{object_key}"
+            else:
+                # Account endpoint or custom domain without bucket, add bucket name
+                url = f"{endpoint_clean}/{bucket_name}/{object_key}"
+        else:
+            # Standard S3 URL format: endpoint already includes bucket name
+            url = f"{endpoint_url.rstrip('/')}/{object_key}"
+
+        print(f"worker-comfyui - Successfully uploaded {filename} to {'R2' if is_r2 else 'S3'}: {url}")
+        return url
+
+    except ClientError as e:
+        error_msg = f"Error uploading {filename} to S3/R2: {e}"
+        print(f"worker-comfyui - {error_msg}")
+        return None
+    except Exception as e:
+        error_msg = f"Unexpected error uploading {filename} to S3/R2: {e}"
+        print(f"worker-comfyui - {error_msg}")
+        return None
+
+
 def handler(job):
     """
     Handles a job using ComfyUI via websockets for status and image retrieval.
@@ -695,6 +795,7 @@ def handler(job):
                         file_extension = os.path.splitext(filename)[1] or ".png"
 
                         if os.environ.get("BUCKET_ENDPOINT_URL"):
+                            temp_file_path = None
                             try:
                                 with tempfile.NamedTemporaryFile(
                                     suffix=file_extension, delete=False
@@ -705,27 +806,39 @@ def handler(job):
                                     f"worker-comfyui - Wrote image bytes to temporary file: {temp_file_path}"
                                 )
 
-                                print(f"worker-comfyui - Uploading {filename} to S3...")
-                                s3_url = rp_upload.upload_image(job_id, temp_file_path)
-                                os.remove(temp_file_path)  # Clean up temp file
-                                print(
-                                    f"worker-comfyui - Uploaded {filename} to S3: {s3_url}"
-                                )
-                                # Append dictionary with filename and URL
-                                output_data.append(
-                                    {
-                                        "filename": filename,
-                                        "type": "s3_url",
-                                        "data": s3_url,
-                                    }
-                                )
+                                s3_url = None
+                                # Try custom upload function first (supports R2 and S3)
+                                if os.environ.get("BUCKET_NAME"):
+                                    print(f"worker-comfyui - Attempting upload using custom S3/R2 function...")
+                                    s3_url = upload_to_s3_or_r2(job_id, temp_file_path, filename)
+                                
+                                # Fallback to rp_upload if custom function failed or BUCKET_NAME not set
+                                if not s3_url:
+                                    print(f"worker-comfyui - Using rp_upload as fallback...")
+                                    s3_url = rp_upload.upload_image(job_id, temp_file_path)
+
+                                if s3_url:
+                                    print(
+                                        f"worker-comfyui - Uploaded {filename} to S3/R2: {s3_url}"
+                                    )
+                                    # Append dictionary with filename and URL
+                                    output_data.append(
+                                        {
+                                            "filename": filename,
+                                            "type": "s3_url",
+                                            "data": s3_url,
+                                        }
+                                    )
+                                else:
+                                    raise Exception("Upload failed: both custom and fallback upload methods returned None")
+                                    
                             except Exception as e:
-                                error_msg = f"Error uploading {filename} to S3: {e}"
+                                error_msg = f"Error uploading {filename} to S3/R2: {e}"
                                 print(f"worker-comfyui - {error_msg}")
                                 errors.append(error_msg)
-                                if "temp_file_path" in locals() and os.path.exists(
-                                    temp_file_path
-                                ):
+                            finally:
+                                # Clean up temp file
+                                if temp_file_path and os.path.exists(temp_file_path):
                                     try:
                                         os.remove(temp_file_path)
                                     except OSError as rm_err:
