@@ -1,0 +1,11 @@
+[project]
+name = "worker-comfyui"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "requests>=2.32.5",
+    "runpod~=1.7.12",
+    "websocket-client>=1.9.0",
+]
