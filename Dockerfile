@@ -134,7 +134,7 @@ RUN mkdir -p models/checkpoints models/vae models/unet models/clip
 #     fi
 
 # Stage 3: Final image
-FROM base AS final
+# FROM base AS final
 
 # Copy models from stage 2 to the final image
-COPY --from=downloader /comfyui/models /comfyui/models
+# COPY --from=downloader /comfyui/models /comfyui/models
